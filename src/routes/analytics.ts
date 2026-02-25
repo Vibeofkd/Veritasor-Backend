@@ -1,11 +1,11 @@
 import { Router } from 'express'
 import { requireBusinessAuth } from '../middleware/requireBusinessAuth.js'
 import { listAttestedPeriodsForBusiness } from '../services/analytics/periods.js'
-import { getRevenueReport } from '../services/analytics/revenueReport.js'
+import { getRevenueReport } from '../services/analytics/revenueReports.js'
 
 export const analyticsRouter = Router()
 
-analyticsRouter.get('/periods', requireBusinessAuth, (_req, res) => {
+analyticsRouter.get('/periods', requireBusinessAuth, ( req, res ) => {
   const businessId = res.locals.businessId as string
   const periods = listAttestedPeriodsForBusiness(businessId)
   res.json({ periods })
