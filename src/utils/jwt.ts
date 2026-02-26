@@ -67,3 +67,17 @@ export function verifyRefreshToken(token: string): TokenPayload | null {
     return null
   }
 }
+
+/**
+ * Sign a JWT token with the given payload
+ * @param payload - Data to encode in the JWT (string, object, or Buffer)
+ * @param options - Optional JWT signing options (expiresIn, algorithm, etc.)
+ * @returns Signed JWT token string
+ */
+export function sign(
+  payload: string | object | Buffer,
+  options?: SignOptions
+): string {
+  const secret = getSecret()
+  return jwt.sign(payload, secret, options)
+}
