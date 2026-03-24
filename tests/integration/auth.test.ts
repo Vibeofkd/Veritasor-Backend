@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import express, { Express } from "express";
+import {
+  rateLimiter,
+  resetRateLimiterStore,
+} from "../../src/middleware/rateLimiter.js";
 
 /**
  * Integration tests for authentication API endpoints
@@ -56,6 +60,13 @@ let resetTokenStore: Array<{
 // Helper to create mock auth router (to be replaced with actual implementation)
 function createMockAuthRouter() {
   const router = express.Router();
+  const routeRateLimiters = {
+    login: rateLimiter({ bucket: "test-auth:login", max: 3, windowMs: 60_000 }),
+    refresh: rateLimiter({ bucket: "test-auth:refresh", max: 3, windowMs: 60_000 }),
+    forgotPassword: rateLimiter({ bucket: "test-auth:forgot-password", max: 2, windowMs: 60_000 }),
+    resetPassword: rateLimiter({ bucket: "test-auth:reset-password", max: 2, windowMs: 60_000 }),
+    me: rateLimiter({ bucket: "test-auth:me", max: 5, windowMs: 60_000 }),
+  };
 
   // POST /auth/signup
   router.post("/signup", (req: express.Request, res: express.Response) => {
@@ -101,7 +112,7 @@ function createMockAuthRouter() {
   });
 
   // POST /auth/login
-  router.post("/login", (req: express.Request, res: express.Response) => {
+  router.post("/login", routeRateLimiters.login, (req: express.Request, res: express.Response) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -136,7 +147,7 @@ function createMockAuthRouter() {
   });
 
   // POST /auth/refresh
-  router.post("/refresh", (req: express.Request, res: express.Response) => {
+  router.post("/refresh", routeRateLimiters.refresh, (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.body;
 
     if (!refreshToken) {
@@ -170,7 +181,7 @@ function createMockAuthRouter() {
   });
 
   // GET /auth/me
-  router.get("/me", (req: express.Request, res: express.Response) => {
+  router.get("/me", routeRateLimiters.me, (req: express.Request, res: express.Response) => {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -200,6 +211,7 @@ function createMockAuthRouter() {
   // POST /auth/forgot-password
   router.post(
     "/forgot-password",
+    routeRateLimiters.forgotPassword,
     (req: express.Request, res: express.Response) => {
       const { email } = req.body;
 
@@ -235,6 +247,7 @@ function createMockAuthRouter() {
   // POST /auth/reset-password
   router.post(
     "/reset-password",
+    routeRateLimiters.resetPassword,
     (req: express.Request, res: express.Response) => {
       const { token, newPassword } = req.body;
 
@@ -293,6 +306,7 @@ beforeEach(() => {
   userStore = [];
   tokenStore = [];
   resetTokenStore = [];
+  resetRateLimiterStore();
 });
 
 afterAll(() => {
@@ -727,5 +741,82 @@ describe("Auth flow integration", () => {
 
     expect(loginResponse.body.user.email).toBe(testUser2.email);
     expect(loginResponse.body).toHaveProperty("accessToken");
+  });
+});
+
+describe("Route-level rate limiting", () => {
+  it("should throttle repeated login attempts within the login bucket", async () => {
+    await request(app).post("/api/auth/signup").send(testUser).expect(201);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await request(app)
+        .post("/api/auth/login")
+        .send({
+          email: testUser.email,
+          password: testUser.password,
+        })
+        .expect(200);
+    }
+
+    const response = await request(app)
+      .post("/api/auth/login")
+      .send({
+        email: testUser.email,
+        password: testUser.password,
+      })
+      .expect(429);
+
+    expect(response.body.error).toMatch(/too many requests/i);
+    expect(response.headers["x-ratelimit-bucket"]).toBe("test-auth:login");
+    expect(response.headers["x-ratelimit-limit"]).toBe("3");
+    expect(response.headers["x-ratelimit-remaining"]).toBe("0");
+    expect(response.headers["retry-after"]).toBeDefined();
+  });
+
+  it("should keep login and refresh buckets isolated for the same client", async () => {
+    const signupResponse = await request(app)
+      .post("/api/auth/signup")
+      .send(testUser)
+      .expect(201);
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await request(app)
+        .post("/api/auth/login")
+        .send({
+          email: testUser.email,
+          password: testUser.password,
+        })
+        .expect(attempt < 3 ? 200 : 429);
+    }
+
+    const refreshResponse = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken: signupResponse.body.refreshToken })
+      .expect(200);
+
+    expect(refreshResponse.body).toHaveProperty("accessToken");
+    expect(refreshResponse.headers["x-ratelimit-bucket"]).toBe("test-auth:refresh");
+  });
+
+  it("should keep login and forgot-password buckets isolated for the same IP", async () => {
+    await request(app).post("/api/auth/signup").send(testUser).expect(201);
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await request(app)
+        .post("/api/auth/login")
+        .send({
+          email: testUser.email,
+          password: testUser.password,
+        })
+        .expect(attempt < 3 ? 200 : 429);
+    }
+
+    const forgotPasswordResponse = await request(app)
+      .post("/api/auth/forgot-password")
+      .send({ email: testUser.email })
+      .expect(200);
+
+    expect(forgotPasswordResponse.body.message).toMatch(/reset link has been sent/i);
+    expect(forgotPasswordResponse.headers["x-ratelimit-bucket"]).toBe("test-auth:forgot-password");
   });
 });
